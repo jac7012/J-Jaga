@@ -1,0 +1,8 @@
+{
+  "name": "J-Jaga: AI Car Guardian",
+  "description": "An AI-first car centric PWA providing diagnostic assistance, used car vetting, and emergency crash response with a HUD-based agentic interface.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
