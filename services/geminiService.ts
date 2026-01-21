@@ -7,28 +7,32 @@ export const getGeminiClient = () => {
   return new GoogleGenAI({ apiKey: API_KEY });
 };
 
-const GUARDIAN_LIVE_PROMPT = `You are the user's comforting "Guardian" (acting as a calm, loving family member). 
+const GUARDIAN_LIVE_PROMPT = `You are the user's comforting "Guardian," acting as a calm, loving family member (like a parent). 
 The user has just been in a car accident. 
-1. Reassure them first: "Take a deep breath, you're safe, I'm here."
-2. Use a warm, parental tone. 
-3. Guide them using the video feed. If you see a license plate, tell them to hold steady.
-4. Use the function 'draw_ar_marker' to highlight things like 'license_plate', 'road_tax', or 'witness'.
-5. If a witness is present, tell the user to point the phone at them so you can record their testimony.
-6. Context: Malaysian Road Transport Act 1987. Remind them: "Don't admit fault."`;
+1. Reassure them first: "Take a deep breath, I'm here. You're safe."
+2. Use a warm, protective Malaysian-English (Manglish) or Standard English tone.
+3. Guidance:
+   - "Hold your phone up to the license plate."
+   - "Now, show me the road tax sticker on the windshield."
+   - "Check if there are any witnesses nearby. If so, point the camera at them so I can hear them."
+4. AR Markers: Call 'draw_ar_marker' immediately when you see: 'license_plate', 'road_tax', 'witness', or 'car_damage'.
+5. Testimony: When a witness speaks, acknowledge it: "I'm recording what they are saying."
+6. Legal: Remind them: "Do not admit fault to anyone."
+7. Malaysian Context: Act 1987 Road Transport context.`;
 
 export const AR_TOOL_DECLARATION = {
   name: 'draw_ar_marker',
   parameters: {
     type: Type.OBJECT,
-    description: 'Highlight a specific area on the user screen with an AR box.',
+    description: 'Place a visual marker on an object in the video feed.',
     properties: {
       target: {
         type: Type.STRING,
-        description: 'The entity to highlight (e.g., license_plate, body_damage, witness, road_tax)',
+        description: 'Object type: license_plate, road_tax, witness, body_damage',
       },
       label: {
         type: Type.STRING,
-        description: 'A short label to show next to the marker.',
+        description: 'A clear label like "PLATE DETECTED" or "WITNESS READY"',
       },
     },
     required: ['target', 'label'],
@@ -47,14 +51,15 @@ export function createLiveSession(callbacks: any) {
       },
       systemInstruction: GUARDIAN_LIVE_PROMPT,
       tools: [{ functionDeclarations: [AR_TOOL_DECLARATION] }],
+      inputAudioTranscription: {},
+      outputAudioTranscription: {},
     },
   });
 }
 
-// Keeping existing static analysis functions...
 export async function analyzeMechanic(audioBase64: string, quoteImage?: string) {
   const ai = getGeminiClient();
-  const parts: any[] = [{ inlineData: { data: audioBase64, mimeType: 'audio/webm' } }, { text: "Analyze for mechanical failure." }];
+  const parts: any[] = [{ inlineData: { data: audioBase64, mimeType: 'audio/webm' } }, { text: "Analyze engine failure." }];
   if (quoteImage) parts.push({ inlineData: { data: quoteImage.split(',')[1], mimeType: 'image/jpeg' } });
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
@@ -68,7 +73,7 @@ export async function analyzeSceptic(input: string) {
   const ai = getGeminiClient();
   const response = await ai.models.generateContent({
     model: 'gemini-3-flash-preview',
-    contents: `Analyze listing: ${input}`,
+    contents: `Analyze: ${input}`,
     config: { responseMimeType: 'application/json' }
   });
   return JSON.parse(response.text || '{}');
