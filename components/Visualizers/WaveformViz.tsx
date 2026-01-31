@@ -8,7 +8,8 @@ interface WaveformVizProps {
 
 const WaveformViz: React.FC<WaveformVizProps> = ({ isRecording, color = '#22d3ee' }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animationRef = useRef<number>();
+  // Fix: Added initial value 0 to satisfy 'Expected 1 arguments' error at line 11 (or 10 depending on mapping)
+  const animationRef = useRef<number>(0);
 
   useEffect(() => {
     const canvas = canvasRef.current;

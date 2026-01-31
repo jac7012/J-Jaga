@@ -1,16 +1,27 @@
 
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import Webcam from 'react-webcam';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ShieldAlert, ShieldCheck, ArrowLeft, Mic, UserRound, MessageSquare } from 'lucide-react';
+import { 
+  ShieldAlert, 
+  ArrowLeft, 
+  Mic, 
+  Scan, 
+  ClipboardList, 
+  Layers, 
+  Info,
+  ChevronRight,
+  AlertTriangle,
+  History,
+  Lock
+} from 'lucide-react';
 import { createLiveSession } from '../../services/geminiService';
 
-// --- Manual Encoding/Decoding Helpers ---
+// --- PCM Encoding/Decoding ---
 function decode(base64: string) {
-  const binaryString = atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
 
@@ -20,238 +31,334 @@ function encode(bytes: Uint8Array) {
   return btoa(binary);
 }
 
-async function decodeAudioData(data: Uint8Array, ctx: AudioContext, sampleRate: number, numChannels: number): Promise<AudioBuffer> {
+async function decodeAudioData(data: Uint8Array, ctx: AudioContext, sampleRate: number): Promise<AudioBuffer> {
   const dataInt16 = new Int16Array(data.buffer);
-  const frameCount = dataInt16.length / numChannels;
-  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
-  for (let channel = 0; channel < numChannels; channel++) {
-    const channelData = buffer.getChannelData(channel);
-    for (let i = 0; i < frameCount; i++) {
-      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
-    }
-  }
+  const buffer = ctx.createBuffer(1, dataInt16.length, sampleRate);
+  const channelData = buffer.getChannelData(0);
+  for (let i = 0; i < dataInt16.length; i++) channelData[i] = dataInt16[i] / 32768.0;
   return buffer;
 }
 
-interface GuardianHUDProps {
-  onBack: () => void;
+interface EvidenceItem {
+  id: string;
+  category: string;
+  value: string;
+  time: string;
 }
 
-const GuardianHUD: React.FC<GuardianHUDProps> = ({ onBack }) => {
+const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   const webcamRef = useRef<Webcam>(null);
   const [session, setSession] = useState<any>(null);
-  const [arMarker, setArMarker] = useState<{ target: string; label: string } | null>(null);
-  const [transcription, setTranscription] = useState({ user: "", ai: "" });
-  const [isWitnessMode, setIsWitnessMode] = useState(false);
+  const [arMarker, setArMarker] = useState<any>(null);
+  const [evidence, setEvidence] = useState<EvidenceItem[]>([]);
+  const [subs, setSubs] = useState({ user: "", ai: "" });
+  const [isVaultOpen, setIsVaultOpen] = useState(false);
+  const [isReady, setIsReady] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const audioOutContextRef = useRef<AudioContext | null>(null);
-  const audioInContextRef = useRef<AudioContext | null>(null);
-  const nextStartTimeRef = useRef(0);
-  const sessionPromiseRef = useRef<Promise<any> | null>(null);
-
-  useEffect(() => {
-    // 1. Setup Audio Out
-    audioOutContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-    
-    // 2. Setup Session
-    sessionPromiseRef.current = createLiveSession({
-      onopen: () => {
-        console.log("Guardian session opened.");
-        setupMicrophone();
-      },
-      onmessage: async (msg: any) => {
-        // Handle Audio Playback
-        const base64Audio = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-        if (base64Audio && audioOutContextRef.current) {
-          const buffer = await decodeAudioData(decode(base64Audio), audioOutContextRef.current, 24000, 1);
-          const source = audioOutContextRef.current.createBufferSource();
-          source.buffer = buffer;
-          source.connect(audioOutContextRef.current.destination);
-          const startTime = Math.max(nextStartTimeRef.current, audioOutContextRef.current.currentTime);
-          source.start(startTime);
-          nextStartTimeRef.current = startTime + buffer.duration;
-        }
-
-        // Handle Transcriptions
-        if (msg.serverContent?.inputTranscription) {
-          setTranscription(prev => ({ ...prev, user: msg.serverContent.inputTranscription.text }));
-        }
-        if (msg.serverContent?.outputTranscription) {
-          setTranscription(prev => ({ ...prev, ai: msg.serverContent.outputTranscription.text }));
-        }
-
-        // Handle Tool Calls (AR)
-        if (msg.toolCall) {
-          for (const fc of msg.toolCall.functionCalls) {
-            if (fc.name === 'draw_ar_marker') {
-              setArMarker(fc.args);
-              setTimeout(() => setArMarker(null), 8000);
-              sessionPromiseRef.current?.then(s => s.sendToolResponse({
-                functionResponses: [{ id: fc.id, name: fc.name, response: { result: "ok" } }]
-              }));
-            }
-          }
-        }
-      },
-      onerror: (e: any) => console.error("Live Error:", e),
-      onclose: () => console.log("Guardian Session Closed")
-    });
-
-    sessionPromiseRef.current.then(setSession);
-
-    return () => {
-      sessionPromiseRef.current?.then(s => s.close());
-      audioOutContextRef.current?.close();
-      audioInContextRef.current?.close();
-    };
-  }, []);
+  const audioOutContext = useRef<AudioContext | null>(null);
+  const audioInContext = useRef<AudioContext | null>(null);
+  const nextStartTime = useRef(0);
+  const sessionPromise = useRef<Promise<any> | null>(null);
 
   const setupMicrophone = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioInContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const source = audioInContextRef.current.createMediaStreamSource(stream);
-      const processor = audioInContextRef.current.createScriptProcessor(4096, 1, 1);
+      if (!audioInContext.current) return;
 
+      const source = audioInContext.current.createMediaStreamSource(stream);
+      const processor = audioInContext.current.createScriptProcessor(4096, 1, 1);
+      
       processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const l = inputData.length;
-        const int16 = new Int16Array(l);
-        for (let i = 0; i < l; i++) int16[i] = inputData[i] * 32768;
-        
-        sessionPromiseRef.current?.then(s => {
-          s.sendRealtimeInput({
-            media: { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' }
-          });
-        });
+        const input = e.inputBuffer.getChannelData(0);
+        const int16 = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) int16[i] = input[i] * 32768;
+        sessionPromise.current?.then(s => s.sendRealtimeInput({
+          media: { data: encode(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' }
+        }));
       };
-
+      
       source.connect(processor);
-      processor.connect(audioInContextRef.current.destination);
-    } catch (err) {
-      console.error("Mic Error:", err);
+      processor.connect(audioInContext.current.destination);
+    } catch (err: any) {
+      console.error("Mic access denied", err);
+      setErrorMsg("Microphone access denied. Please enable it in your browser settings.");
     }
   };
 
-  // Video Stream Logic
+  // User-gesture handler to safely initialize Audio and Mic
+  const handleStartProtocol = useCallback(async (e: React.MouseEvent | React.TouchEvent) => {
+    e.stopPropagation();
+    if (isReady) return;
+    
+    try {
+      // 1. Initialize Audio Contexts within user gesture
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      audioOutContext.current = new AudioCtx({ sampleRate: 24000 });
+      audioInContext.current = new AudioCtx({ sampleRate: 16000 });
+      
+      // 2. Explicitly resume to satisfy browser autoplay policies
+      await audioOutContext.current.resume();
+      await audioInContext.current.resume();
+
+      // 3. Request permissions immediately
+      await setupMicrophone();
+
+      // 4. Create session
+      sessionPromise.current = createLiveSession({
+        onopen: () => {
+          console.log("Guardian session connected.");
+          setErrorMsg(null);
+        },
+        onmessage: async (msg: any) => {
+          // Audio Output from Gemini
+          const data = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+          if (data && audioOutContext.current) {
+            const buffer = await decodeAudioData(decode(data), audioOutContext.current, 24000);
+            const source = audioOutContext.current.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioOutContext.current.destination);
+            const start = Math.max(nextStartTime.current, audioOutContext.current.currentTime);
+            source.start(start);
+            nextStartTime.current = start + buffer.duration;
+          }
+
+          // Transcriptions
+          if (msg.serverContent?.inputTranscription) setSubs(prev => ({ ...prev, user: msg.serverContent.inputTranscription.text }));
+          if (msg.serverContent?.outputTranscription) setSubs(prev => ({ ...prev, ai: msg.serverContent.outputTranscription.text }));
+
+          // Tooling Logic (AR and Logging)
+          if (msg.toolCall) {
+            for (const fc of msg.toolCall.functionCalls) {
+              if (fc.name === 'draw_ar_marker') {
+                setArMarker(fc.args);
+                setTimeout(() => setArMarker(null), 10000);
+              }
+              if (fc.name === 'log_evidence') {
+                setEvidence(prev => [{
+                  id: Math.random().toString(),
+                  category: fc.args.category,
+                  value: fc.args.value,
+                  time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                }, ...prev]);
+                setIsVaultOpen(true);
+              }
+              sessionPromise.current?.then(s => s.sendToolResponse({
+                functionResponses: [{ id: fc.id, name: fc.name, response: { status: "logged" } }]
+              }));
+            }
+          }
+        },
+        onerror: (err: any) => {
+          console.error("Live session error", err);
+          setErrorMsg("Guardian link interrupted. Retrying...");
+        },
+        onclose: () => {
+          console.log("Guardian link closed.");
+        }
+      });
+
+      sessionPromise.current.then(setSession);
+      setIsReady(true);
+    } catch (err) {
+      console.error("Protocol initialization failed", err);
+      setErrorMsg("Failed to start protocol. Check device permissions.");
+    }
+  }, [isReady]);
+
+  // Visual frame stream
   useEffect(() => {
     if (!session) return;
     const interval = setInterval(() => {
       const frame = webcamRef.current?.getScreenshot();
       if (frame) {
-        session.sendRealtimeInput({
-          media: { data: frame.split(',')[1], mimeType: 'image/jpeg' }
-        });
+        session.sendRealtimeInput({ media: { data: frame.split(',')[1], mimeType: 'image/jpeg' } });
       }
-    }, 1000); // 1 FPS for efficiency
+    }, 1200);
     return () => clearInterval(interval);
   }, [session]);
 
   return (
-    <div className="fixed inset-0 bg-black z-50 flex flex-col overflow-hidden select-none">
-      <Webcam
-        ref={webcamRef}
-        audio={false}
-        screenshotFormat="image/jpeg"
-        videoConstraints={{ facingMode: "environment", width: 1280, height: 720 }}
-        className="absolute inset-0 w-full h-full object-cover opacity-70"
+    <div className="fixed inset-0 bg-black z-50 flex flex-col overflow-hidden text-white safe-area-inset">
+      <Webcam 
+        ref={webcamRef} 
+        audio={false} 
+        screenshotFormat="image/jpeg" 
+        videoConstraints={{ facingMode: "environment", width: 1280, height: 720 }} 
+        className="absolute inset-0 w-full h-full object-cover opacity-60 pointer-events-none"
+        onUserMediaError={() => setErrorMsg("Camera access denied.")}
       />
 
-      {/* Dynamic AR Markers */}
-      <AnimatePresence>
-        {arMarker && (
-          <motion.div
-            initial={{ scale: 0.8, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 1.2, opacity: 0 }}
-            className="absolute inset-0 flex items-center justify-center pointer-events-none"
-          >
-            <div className="w-72 h-72 border-[4px] border-cyan-400 rounded-[2rem] relative shadow-[0_0_80px_rgba(34,211,238,0.6)]">
-               <div className="absolute -top-14 left-1/2 -translate-x-1/2 bg-cyan-400 text-black px-6 py-2 rounded-full font-black text-sm mono uppercase shadow-xl whitespace-nowrap">
-                  {arMarker.label}
-               </div>
-               <motion.div 
-                 animate={{ opacity: [0.1, 0.4, 0.1], scale: [1, 1.05, 1] }}
-                 transition={{ repeat: Infinity, duration: 1.5 }}
-                 className="absolute inset-0 bg-cyan-400/20 rounded-[2rem]" 
-               />
-               <div className="absolute inset-0 border border-white/20 animate-pulse rounded-[2rem]" />
+      {/* Permission & Start Overlay */}
+      {!isReady && (
+        <div className="absolute inset-0 z-50 glass flex flex-col items-center justify-center p-8 text-center bg-black/80 backdrop-blur-xl">
+          <motion.div animate={{ scale: [1, 1.05, 1] }} transition={{ repeat: Infinity, duration: 2 }} className="mb-8">
+            <div className="relative">
+              <ShieldAlert className="w-24 h-24 text-red-500 relative z-10" />
+              <div className="absolute inset-0 bg-red-500/20 blur-2xl rounded-full" />
             </div>
           </motion.div>
-        )}
-      </AnimatePresence>
+          <h2 className="text-3xl font-black italic uppercase tracking-tighter mb-4 text-white">Initialize Guardian</h2>
+          <p className="text-white/60 text-sm mb-10 max-w-xs mx-auto">
+            Guardian Mode requires real-time camera and microphone access to document the incident and provide guidance.
+          </p>
+          
+          {errorMsg && (
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mb-6 flex items-center gap-2 text-red-400 bg-red-500/10 px-4 py-2 rounded-xl border border-red-500/20">
+              <Lock className="w-4 h-4" />
+              <span className="text-xs font-bold">{errorMsg}</span>
+            </motion.div>
+          )}
 
-      {/* HUD Layer */}
-      <div className="relative z-10 flex flex-col h-full p-6 bg-gradient-to-b from-black/40 via-transparent to-black/60">
-        <div className="flex justify-between items-start">
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-2">
-              <ShieldAlert className="w-6 h-6 neon-red" />
-              <span className="mono font-black text-xl text-red-500 tracking-tighter">GUARDIAN_LIVE</span>
-            </div>
-            <div className="glass px-3 py-1 rounded-full border-red-500/30 flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              <span className="text-[10px] mono text-red-400 uppercase tracking-widest">Aura Sync: Zephyr-01</span>
-            </div>
-          </div>
-          <button onClick={onBack} className="p-3 glass rounded-full border-white/10 hover:bg-white/5 transition-colors">
-            <ArrowLeft className="w-6 h-6 text-white" />
+          <button 
+            onClick={handleStartProtocol}
+            className="px-10 py-5 bg-red-600 hover:bg-red-500 active:scale-95 transition-all rounded-[2rem] font-black text-xl shadow-[0_20px_40px_rgba(220,38,38,0.4)] border-b-4 border-red-800"
+          >
+            START PROTOCOL
           </button>
         </div>
+      )}
 
-        {/* Subtitles & Transcription Display */}
-        <div className="mt-auto mb-24 space-y-4">
+      {/* HUD Content (Only visible after init) */}
+      {isReady && (
+        <>
+          {/* AR GUIDANCE OVERLAYS */}
           <AnimatePresence>
-            {transcription.user && (
+            {arMarker && (
               <motion.div 
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex items-start gap-3 justify-end"
+                initial={{ opacity: 0, scale: 0.8 }} 
+                animate={{ opacity: 1, scale: 1 }} 
+                exit={{ opacity: 0, scale: 1.1 }}
+                className="absolute inset-0 flex items-center justify-center pointer-events-none z-20"
+                style={{ perspective: '1200px' }}
               >
-                <div className="glass-light bg-white/10 px-4 py-2 rounded-2xl rounded-tr-none text-right max-w-[70%]">
-                  <span className="mono text-[8px] text-white/40 block mb-1 uppercase">User Voice</span>
-                  <p className="text-sm text-white font-medium">{transcription.user}</p>
-                </div>
-                <div className="p-2 glass rounded-full shrink-0"><Mic className="w-4 h-4 text-white/50" /></div>
-              </motion.div>
-            )}
+                <div className="relative w-80 h-80 border-2 border-cyan-400/40 rounded-[3rem]" style={{ transform: `rotateY(${arMarker.rotation || 0}deg)` }}>
+                   <div className="absolute top-0 left-0 w-10 h-10 border-t-4 border-l-4 border-cyan-400" />
+                   <div className="absolute top-0 right-0 w-10 h-10 border-t-4 border-r-4 border-cyan-400" />
+                   <div className="absolute bottom-0 left-0 w-10 h-10 border-b-4 border-l-4 border-cyan-400" />
+                   <div className="absolute bottom-0 right-0 w-10 h-10 border-b-4 border-r-4 border-cyan-400" />
+                   
+                   <motion.div 
+                     animate={{ opacity: [0.1, 0.4, 0.1] }} 
+                     transition={{ repeat: Infinity, duration: 1.5 }} 
+                     className="absolute inset-6 bg-cyan-400/5 rounded-[2.5rem] flex items-center justify-center"
+                   >
+                     <Scan className="w-16 h-16 text-cyan-400/50 animate-pulse" />
+                   </motion.div>
 
-            {transcription.ai && (
-              <motion.div 
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex items-start gap-3"
-              >
-                <div className="p-2 glass rounded-full shrink-0 bg-cyan-500/20 border-cyan-500/50">
-                  <MessageSquare className="w-4 h-4 text-cyan-400" />
-                </div>
-                <div className="glass bg-cyan-950/40 border-cyan-500/30 px-6 py-4 rounded-3xl rounded-tl-none max-w-[85%] shadow-2xl">
-                  <span className="mono text-[8px] text-cyan-400 block mb-1 uppercase tracking-widest">Guardian Input</span>
-                  <p className="text-lg font-semibold leading-tight text-cyan-50 text-shadow-sm italic">
-                    {transcription.ai}
-                  </p>
+                   <div className="absolute -top-14 left-0 right-0 flex justify-center">
+                     <span className="bg-cyan-500 text-black px-6 py-2 rounded-full text-xs font-black uppercase tracking-widest shadow-2xl border border-white/20">
+                       LOCK: {arMarker.label}
+                     </span>
+                   </div>
                 </div>
               </motion.div>
             )}
           </AnimatePresence>
-        </div>
 
-        {/* HUD Controls */}
-        <div className="grid grid-cols-2 gap-4 mb-8">
-           <button 
-             onClick={() => setIsWitnessMode(!isWitnessMode)}
-             className={`glass p-6 rounded-3xl border-2 transition-all flex flex-col items-center gap-2 relative overflow-hidden group ${isWitnessMode ? 'border-orange-500 bg-orange-500/20' : 'border-white/5'}`}
-           >
-              <UserRound className={`w-8 h-8 transition-colors ${isWitnessMode ? 'text-orange-400' : 'text-white/20'}`} />
-              <span className="text-[10px] mono uppercase opacity-60 tracking-tighter">Witness Focus</span>
-              {isWitnessMode && <div className="absolute inset-0 bg-orange-500/5 animate-pulse" />}
-           </button>
-           <div className="glass p-6 rounded-3xl border-white/5 flex flex-col items-center justify-center gap-2">
-              <ShieldCheck className="w-8 h-8 text-green-500" />
-              <span className="text-[10px] mono uppercase opacity-60 tracking-tighter">Evidence Secure</span>
-           </div>
-        </div>
-      </div>
+          {/* TOP CONTROL BAR */}
+          <div className="relative z-30 flex justify-between items-start p-6 pt-14">
+            <div className="flex flex-col">
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
+                <h1 className="text-2xl font-black tracking-tighter italic text-red-500 text-shadow-lg">GUARDIAN_HUD</h1>
+              </div>
+              <span className="text-[10px] mono text-white/40 uppercase mt-1 tracking-[0.2em]">Protocol Active // Encrypted Channel</span>
+            </div>
+            <button onClick={onBack} className="glass p-4 rounded-full border-white/10 active:scale-90 transition-all shadow-xl">
+              <ArrowLeft className="w-6 h-6" />
+            </button>
+          </div>
+
+          {/* SIDEBAR - EVIDENCE VAULT */}
+          <motion.div 
+            initial={false}
+            animate={{ x: isVaultOpen ? 0 : 'calc(100% - 30px)' }}
+            className="absolute top-36 right-0 bottom-64 w-64 glass rounded-l-[2.5rem] border-l border-white/10 z-40 shadow-2xl transition-all"
+          >
+            <button 
+              onClick={(e) => { e.stopPropagation(); setIsVaultOpen(!isVaultOpen); }}
+              className="absolute left-0 top-1/2 -translate-y-1/2 p-3 bg-red-600 text-white rounded-r-xl shadow-lg"
+            >
+              <ChevronRight className={`w-5 h-5 transition-transform ${isVaultOpen ? 'rotate-180' : ''}`} />
+            </button>
+            <div className="p-6 flex flex-col h-full overflow-hidden">
+              <div className="flex items-center gap-2 mb-6 border-b border-white/5 pb-3">
+                <ClipboardList className="w-5 h-5 text-cyan-400" />
+                <span className="text-xs font-black mono uppercase tracking-widest">Incident Log</span>
+              </div>
+              <div className="flex-1 overflow-y-auto space-y-4 no-scrollbar pr-1">
+                {evidence.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center opacity-20 text-center p-4 italic">
+                    <Layers className="w-10 h-10 mb-4" />
+                    <span className="text-[10px] mono uppercase">Waiting for extraction...</span>
+                  </div>
+                ) : (
+                  evidence.map(item => (
+                    <motion.div initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} key={item.id} className="bg-white/5 border-l-4 border-cyan-500 p-4 rounded-r-2xl shadow-inner">
+                      <div className="flex justify-between items-center mb-1">
+                        <span className="text-[9px] mono text-cyan-400 font-black">{item.category}</span>
+                        <span className="text-[9px] mono text-white/20">{item.time}</span>
+                      </div>
+                      <p className="text-sm font-black uppercase leading-tight tracking-tight">{item.value}</p>
+                    </motion.div>
+                  ))
+                )}
+              </div>
+              <div className="mt-4 pt-4 border-t border-white/10 flex items-center gap-2 opacity-30">
+                <Info className="w-4 h-4" />
+                <span className="text-[9px] mono uppercase">Timestamp Evidence Ready</span>
+              </div>
+            </div>
+          </motion.div>
+
+          {/* SUBTITLES SYSTEM */}
+          <div className="mt-auto p-6 mb-32 z-30 space-y-4">
+            <AnimatePresence>
+              {subs.user && (
+                <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex justify-end">
+                  <div className="glass-light bg-white/10 border border-white/5 px-5 py-3 rounded-2xl rounded-tr-none text-right max-w-[85%] shadow-xl">
+                    <span className="text-[9px] mono text-white/30 block mb-1 uppercase tracking-widest font-black">Environmental Input</span>
+                    <p className="text-sm font-medium text-white/90 italic leading-relaxed">"{subs.user}"</p>
+                  </div>
+                </motion.div>
+              )}
+              {subs.ai && (
+                <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} className="flex items-start gap-3">
+                  <div className="w-12 h-12 rounded-full glass border border-red-500/50 flex items-center justify-center shrink-0 shadow-lg">
+                    <motion.div animate={{ scale: [1, 1.4, 1], opacity: [0.5, 1, 0.5] }} transition={{ repeat: Infinity, duration: 1 }} className="w-3 h-3 rounded-full bg-red-500 shadow-[0_0_10px_#ef4444]" />
+                  </div>
+                  <div className="glass bg-red-950/20 border-red-500/30 px-6 py-5 rounded-3xl rounded-tl-none max-w-[88%] shadow-2xl backdrop-blur-md">
+                    <span className="text-[9px] mono text-red-400 font-black block mb-1 uppercase tracking-widest">J-Jaga Response</span>
+                    <p className="text-xl font-black leading-tight text-white drop-shadow-xl italic tracking-tight">
+                      {subs.ai}
+                    </p>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* EMERGENCY FOOTER HUD */}
+          <div className="absolute bottom-0 inset-x-0 glass border-t border-white/10 bg-black/90 z-40 p-6 pb-12 flex items-center justify-between shadow-[0_-10px_40px_rgba(0,0,0,0.5)]">
+             <div className="flex flex-col">
+                <div className="flex items-center gap-2">
+                   <AlertTriangle className="w-5 h-5 text-yellow-500" />
+                   <span className="text-sm font-black uppercase text-yellow-500 tracking-widest italic">Safety Protocol</span>
+                </div>
+                <p className="text-[11px] mono text-white/50 mt-1 uppercase">Stay safe // Data being preserved</p>
+             </div>
+             <div className="flex gap-4">
+                <button className="w-16 h-16 rounded-2xl glass border-white/10 flex items-center justify-center active:bg-white/10 transition-colors shadow-lg group">
+                   <History className="w-7 h-7 opacity-40 group-hover:opacity-100 transition-opacity" />
+                </button>
+                <div className="w-20 h-20 rounded-full bg-red-600 flex items-center justify-center shadow-2xl shadow-red-900/60 border-2 border-white/10">
+                   <Mic className="w-10 h-10 text-white animate-pulse" />
+                </div>
+             </div>
+          </div>
+        </>
+      )}
     </div>
   );
 };
