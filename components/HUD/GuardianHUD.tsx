@@ -21,7 +21,8 @@ import {
   Eye,
   Camera,
   CheckCircle2,
-  Loader2
+  Loader2,
+  Target
 } from 'lucide-react';
 import { createLiveSession } from '../../services/geminiService';
 
@@ -124,7 +125,6 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
         onmessage: async (msg: any) => {
           setIsAiThinking(false);
 
-          // Audio playback and subtitle sync
           const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
           if (audioData && audioOutContext.current) {
             const buffer = await decodeAudioData(decode(audioData), audioOutContext.current, 24000);
@@ -143,13 +143,14 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
              setSubs(prev => ({ ...prev, ai: msg.serverContent.outputTranscription.text }));
           }
 
-          // Tool Handling
           if (msg.toolCall) {
             for (const fc of msg.toolCall.functionCalls) {
               if (fc.name === 'draw_ar_marker') {
                 setArMarker(fc.args);
-                // Keep markers visible for a significant time for manual alignment
-                setTimeout(() => setArMarker(null), 15000);
+                // Sticky markers: last for 20 seconds or until replaced
+                setTimeout(() => {
+                   setArMarker((current: any) => current === fc.args ? null : current);
+                }, 20000);
               }
               if (fc.name === 'log_evidence') {
                 setEvidence(prev => [{
@@ -160,9 +161,10 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                   time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                 }, ...prev]);
                 setIsVaultOpen(true);
+                setArMarker(null); // Clear active marker once logged
               }
               sessionPromise.current?.then(s => s.sendToolResponse({
-                functionResponses: [{ id: fc.id, name: fc.name, response: { status: "hud_synchronized" } }]
+                functionResponses: [{ id: fc.id, name: fc.name, response: { status: "logged_to_hud" } }]
               }));
             }
           }
@@ -177,7 +179,6 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     }
   }, [isReady]);
 
-  // Higher frequency vision stream for better damage recognition
   useEffect(() => {
     if (!session) return;
     const interval = setInterval(() => {
@@ -185,7 +186,7 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
       if (frame) {
         session.sendRealtimeInput({ media: { data: frame.split(',')[1], mimeType: 'image/jpeg' } });
       }
-    }, 1000); 
+    }, 800); // Faster stream for reactive text/damage recognition
     return () => clearInterval(interval);
   }, [session]);
 
@@ -202,11 +203,11 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
 
       {!isReady ? (
         <div className="absolute inset-0 z-50 glass-dark flex flex-col items-center justify-center p-10 text-center bg-black/95 backdrop-blur-3xl">
-          <motion.div animate={{ scale: [1, 1.15, 1], filter: ["hue-rotate(0deg)", "hue-rotate(45deg)", "hue-rotate(0deg)"] }} transition={{ repeat: Infinity, duration: 3 }} className="mb-12">
+          <motion.div animate={{ scale: [1, 1.15, 1] }} transition={{ repeat: Infinity, duration: 3 }} className="mb-12">
             <ShieldAlert className="w-40 h-40 text-red-500 shadow-[0_0_100px_rgba(239,68,68,0.4)]" />
           </motion.div>
           <h2 className="text-4xl font-black italic uppercase tracking-tighter mb-4 text-white">Deploy Guardian</h2>
-          <p className="text-white/60 text-lg mb-12 max-w-xs mx-auto leading-tight font-medium">Establishing persistent investigation link.</p>
+          <p className="text-white/60 text-lg mb-12 max-w-xs mx-auto leading-tight font-medium">Activating patient investigation and state-tracking OS.</p>
           
           <button 
             onClick={handleStart}
@@ -217,40 +218,45 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
         </div>
       ) : (
         <>
-          {/* MOBILE-OPTIMIZED AR TARGETING (REFINED DEPTH) */}
+          {/* AR TARGETING (PERSISTENT & LAYERED) */}
           <AnimatePresence>
             {arMarker && (
               <motion.div 
                 key="ar-marker"
-                initial={{ opacity: 0, scale: 0.5, translateZ: -300 }} 
+                initial={{ opacity: 0, scale: 0.5, translateZ: -400 }} 
                 animate={{ opacity: 1, scale: 1, translateZ: 0 }} 
-                exit={{ opacity: 0, scale: 1.5, translateZ: 300 }}
+                exit={{ opacity: 0, scale: 1.5, translateZ: 400 }}
                 className="absolute inset-0 flex items-center justify-center pointer-events-none z-20"
                 style={{ transformStyle: 'preserve-3d' }}
               >
                 <div 
-                  className="relative w-80 h-64 border-2 border-cyan-400/10 rounded-3xl"
+                  className="relative w-80 h-80 border-2 border-white/5 rounded-full"
                   style={{ transform: `rotateX(${arMarker.rotationX || 0}deg) rotateY(${arMarker.rotationY || 0}deg)` }}
                 >
-                   {/* Heavy 3D Brackets */}
-                   <div className="absolute top-0 left-0 w-20 h-20 border-t-8 border-l-8 border-cyan-400 shadow-[0_0_40px_rgba(34,211,238,0.8)]" />
-                   <div className="absolute top-0 right-0 w-20 h-20 border-t-8 border-r-8 border-cyan-400 shadow-[0_0_40px_rgba(34,211,238,0.8)]" />
-                   <div className="absolute bottom-0 left-0 w-20 h-20 border-b-8 border-l-8 border-cyan-400 shadow-[0_0_40px_rgba(34,211,238,0.8)]" />
-                   <div className="absolute bottom-0 right-0 w-20 h-20 border-b-8 border-r-8 border-cyan-400 shadow-[0_0_40px_rgba(34,211,238,0.8)]" />
+                   {/* Investigation Reticle */}
+                   <div className="absolute top-0 left-0 w-24 h-24 border-t-[12px] border-l-[12px] border-cyan-400 shadow-[0_0_50px_rgba(34,211,238,0.8)]" />
+                   <div className="absolute top-0 right-0 w-24 h-24 border-t-[12px] border-r-[12px] border-cyan-400 shadow-[0_0_50px_rgba(34,211,238,0.8)]" />
+                   <div className="absolute bottom-0 left-0 w-24 h-24 border-b-[12px] border-l-[12px] border-cyan-400 shadow-[0_0_50px_rgba(34,211,238,0.8)]" />
+                   <div className="absolute bottom-0 right-0 w-24 h-24 border-b-[12px] border-r-[12px] border-cyan-400 shadow-[0_0_50px_rgba(34,211,238,0.8)]" />
                    
-                   <div className="absolute inset-0 bg-cyan-400/10 backdrop-blur-md rounded-3xl flex items-center justify-center border border-cyan-400/40">
+                   <div className="absolute inset-0 bg-cyan-400/5 backdrop-blur-sm rounded-3xl flex items-center justify-center border border-white/10 overflow-hidden">
+                      <motion.div 
+                        animate={{ y: [-200, 200] }} 
+                        transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                        className="w-full h-[1px] bg-cyan-400 shadow-[0_0_20px_#22d3ee]" 
+                      />
                       <div className="flex flex-col items-center">
-                         <Camera className="w-14 h-14 text-cyan-400 animate-pulse mb-4" />
-                         <span className="text-[10px] mono text-cyan-400 font-black tracking-[0.5em] animate-pulse">ANALYZING TARGET</span>
+                         <Target className="w-16 h-16 text-cyan-400 animate-pulse mb-4" />
+                         <span className="text-[10px] mono text-cyan-400 font-black tracking-[0.5em] animate-pulse">INVESTIGATING {arMarker.target}</span>
                       </div>
                    </div>
 
-                   <div className="absolute -top-16 left-0 right-0 flex justify-center">
+                   <div className="absolute -top-20 left-0 right-0 flex justify-center">
                      <motion.div 
                         initial={{ y: 20 }} animate={{ y: 0 }}
-                        className="bg-cyan-500 text-black px-8 py-3 rounded-full text-[12px] font-black uppercase tracking-widest shadow-[0_0_40px_rgba(34,211,238,0.6)] border-2 border-white"
+                        className="bg-cyan-500 text-black px-10 py-4 rounded-full text-sm font-black uppercase tracking-widest shadow-2xl border-4 border-white/40"
                      >
-                       ACTION: {arMarker.label}
+                       TASK: {arMarker.label}
                      </motion.div>
                    </div>
                 </div>
@@ -259,7 +265,7 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           </AnimatePresence>
 
           {/* HUD HEADER */}
-          <div className="relative z-30 flex justify-between items-start p-6 pt-12 bg-gradient-to-b from-black/90 to-transparent">
+          <div className="relative z-30 flex justify-between items-start p-6 pt-12 bg-gradient-to-b from-black/90 via-black/40 to-transparent">
             <div className="flex flex-col">
               <div className="flex items-center gap-3">
                 <div className="w-3 h-3 rounded-full bg-red-600 animate-ping absolute" />
@@ -267,8 +273,8 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                 <h1 className="text-2xl font-black italic text-red-500 tracking-tighter">GUARDIAN.PRO</h1>
               </div>
               <div className="flex items-center gap-3 mt-1 opacity-50">
-                 <Radio className="w-3 h-3 text-cyan-400 animate-pulse" />
-                 <span className="text-[9px] mono uppercase tracking-widest font-black">Live Investigation Link</span>
+                 <Radio className="w-3 h-3 text-cyan-400" />
+                 <span className="text-[9px] mono uppercase tracking-widest font-black">Link Active // State Tracking On</span>
               </div>
             </div>
             <button onClick={onBack} className="glass p-4 rounded-full border-white/10 active:scale-90 transition-all backdrop-blur-3xl shadow-xl">
@@ -276,11 +282,11 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
             </button>
           </div>
 
-          {/* EVIDENCE VAULT */}
+          {/* CHECKLIST & EVIDENCE VAULT */}
           <motion.div 
             initial={false}
             animate={{ x: isVaultOpen ? 0 : 'calc(100% - 35px)' }}
-            className="absolute top-48 right-0 bottom-80 w-72 glass rounded-l-[3rem] border-l-2 border-white/10 z-40 shadow-2xl transition-all overflow-hidden"
+            className="absolute top-48 right-0 bottom-80 w-80 glass rounded-l-[3rem] border-l-2 border-white/10 z-40 shadow-2xl transition-all overflow-hidden"
           >
             <button 
               onClick={(e) => { e.stopPropagation(); setIsVaultOpen(!isVaultOpen); }}
@@ -291,13 +297,27 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
             <div className="p-8 flex flex-col h-full">
               <div className="flex items-center gap-3 mb-6 border-b border-white/10 pb-4">
                 <ClipboardList className="w-5 h-5 text-cyan-400" />
-                <span className="text-[10px] font-black uppercase tracking-widest text-white italic">Evidence Log</span>
+                <span className="text-[10px] font-black uppercase tracking-widest text-white italic">Investigation State</span>
               </div>
+              
+              {/* Mission Checklist */}
+              <div className="grid grid-cols-2 gap-2 mb-8">
+                 {['DAMAGE', 'PLATE', 'WITNESS', 'SAFETY'].map(task => {
+                    const isDone = evidence.some(e => e.category.includes(task));
+                    return (
+                       <div key={task} className={`p-2 rounded-lg border flex items-center gap-2 transition-all ${isDone ? 'bg-cyan-500/20 border-cyan-500/50' : 'bg-white/5 border-white/10 opacity-30'}`}>
+                          <CheckCircle2 className={`w-3 h-3 ${isDone ? 'text-cyan-400' : 'text-white'}`} />
+                          <span className="text-[8px] mono font-black">{task}</span>
+                       </div>
+                    );
+                 })}
+              </div>
+
               <div className="flex-1 overflow-y-auto space-y-4 no-scrollbar">
                 {evidence.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center opacity-10 text-center italic p-4">
                     <Activity className="w-12 h-12 mb-4 text-cyan-400" />
-                    <span className="text-[9px] mono uppercase tracking-widest">Awaiting Proof...</span>
+                    <span className="text-[9px] mono uppercase tracking-widest">Protocol Stalled // Awaiting Evidence</span>
                   </div>
                 ) : (
                   evidence.map(item => (
@@ -307,6 +327,7 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                         <CheckCircle2 className="w-3 h-3 text-cyan-400" />
                       </div>
                       <p className="text-sm font-black uppercase leading-tight tracking-tight text-white">{item.value}</p>
+                      {item.details && <p className="text-[8px] text-white/30 italic mt-1">{item.details}</p>}
                     </motion.div>
                   ))
                 )}
@@ -314,34 +335,24 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
             </div>
           </motion.div>
 
-          {/* THINKING & DYNAMIC TRANSCRIPTIONS */}
-          <div className="mt-auto p-6 mb-36 z-30 space-y-4">
+          {/* DYNAMIC TRANSCRIPTIONS (HIGHER FOR MOBILE KEYBOARD/UI CLEARANCE) */}
+          <div className="mt-auto p-6 mb-44 z-30 space-y-4">
             <AnimatePresence mode="popLayout">
-              {isAiThinking && (
-                <motion.div initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} className="flex items-center gap-2 mb-2">
-                  <Loader2 className="w-4 h-4 text-cyan-400 animate-spin" />
-                  <span className="text-[9px] mono text-cyan-400 uppercase tracking-widest">Agent Processing...</span>
-                </motion.div>
-              )}
               {subs.user && (
                 <motion.div key="user" initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="flex justify-end">
-                  <div className="glass bg-black/50 border border-white/10 px-5 py-3 rounded-2xl rounded-tr-none text-right max-w-[85%] shadow-xl backdrop-blur-2xl">
-                    <div className="flex items-center gap-2 justify-end mb-1 opacity-30">
-                       <span className="text-[8px] mono uppercase font-black tracking-widest">Environmental Scan</span>
-                       <Volume2 className="w-2.5 h-2.5" />
-                    </div>
+                  <div className="glass bg-black/60 border border-white/20 px-6 py-4 rounded-2xl rounded-tr-none text-right max-w-[85%] shadow-xl backdrop-blur-3xl">
                     <p className="text-sm font-bold text-white leading-tight italic tracking-tight">"{subs.user}"</p>
                   </div>
                 </motion.div>
               )}
               {subs.ai && (
-                <motion.div key="ai" initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="flex items-start gap-3">
-                  <div className="w-12 h-12 rounded-full glass border-2 border-red-500/40 flex items-center justify-center shrink-0 shadow-xl overflow-hidden relative bg-red-950/20">
-                     <motion.div animate={{ height: [4, 12, 4] }} transition={{ repeat: Infinity, duration: 0.5 }} className="w-1 bg-red-500 rounded-full" />
+                <motion.div key="ai" initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="flex items-start gap-4">
+                  <div className="w-14 h-14 rounded-full glass border-2 border-red-500/40 flex items-center justify-center shrink-0 shadow-xl overflow-hidden relative bg-red-950/20">
+                     <motion.div animate={{ scale: [1, 1.3, 1] }} transition={{ repeat: Infinity, duration: 1 }} className="w-3 h-3 bg-red-500 rounded-full shadow-[0_0_15px_red]" />
                   </div>
-                  <div className="glass bg-red-950/20 border border-red-500/30 px-6 py-4 rounded-3xl rounded-tl-none max-w-[85%] shadow-[0_0_80px_rgba(239,68,68,0.2)] backdrop-blur-3xl">
-                    <span className="text-[8px] mono text-red-400 font-black block mb-1 uppercase tracking-widest">Guardian Voice</span>
-                    <p className="text-xl font-black leading-[0.9] text-white italic tracking-tighter drop-shadow-lg">
+                  <div className="glass bg-red-950/20 border-2 border-red-500/40 px-8 py-6 rounded-3xl rounded-tl-none max-w-[85%] shadow-[0_0_100px_rgba(239,68,68,0.3)] backdrop-blur-3xl">
+                    <span className="text-[8px] mono text-red-400 font-black block mb-2 uppercase tracking-widest">Guardian Protocol</span>
+                    <p className="text-2xl font-black leading-[0.9] text-white italic tracking-tighter drop-shadow-lg">
                       {subs.ai}
                     </p>
                   </div>
@@ -351,34 +362,34 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           </div>
 
           {/* EMERGENCY STATUS FOOTER */}
-          <div className="absolute bottom-0 inset-x-0 glass border-t border-white/10 bg-black/95 z-40 p-6 pb-12 flex items-center justify-between shadow-[0_-30px_60px_rgba(0,0,0,0.9)]">
+          <div className="absolute bottom-0 inset-x-0 glass border-t-2 border-white/10 bg-black/95 z-40 p-6 pb-14 flex items-center justify-between shadow-[0_-30px_100px_rgba(0,0,0,1)]">
              <div className="flex flex-col">
-                <div className="flex items-center gap-2">
-                   <AlertTriangle className="w-6 h-6 text-yellow-500 animate-pulse" />
-                   <span className="text-lg font-black uppercase text-yellow-500 tracking-tighter italic">PROTOCOL_LIVE</span>
+                <div className="flex items-center gap-3">
+                   <AlertTriangle className="w-7 h-7 text-yellow-500 animate-pulse" />
+                   <span className="text-xl font-black uppercase text-yellow-500 tracking-tighter italic">INVESTIGATION_LIVE</span>
                 </div>
                 {/* Visual Audio Meter */}
-                <div className="flex items-center gap-1 mt-3">
-                   {[...Array(12)].map((_, i) => (
+                <div className="flex items-center gap-1 mt-4">
+                   {[...Array(16)].map((_, i) => (
                      <motion.div 
                        key={i} 
                        animate={{ 
-                         height: Math.max(4, (micActivity * (0.8 + Math.random() * 0.4)) / 4),
-                         backgroundColor: micActivity > 35 ? '#ef4444' : '#22d3ee'
+                         height: Math.max(4, (micActivity * (0.8 + Math.random() * 0.4)) / 3),
+                         backgroundColor: micActivity > 40 ? '#ef4444' : '#22d3ee'
                        }}
-                       className="w-1 rounded-full transition-all duration-75" 
+                       className="w-1.5 rounded-full transition-all duration-75" 
                      />
                    ))}
-                   <span className="text-[8px] mono text-white/20 ml-2 uppercase font-black">Intake Active</span>
+                   <span className="text-[9px] mono text-white/30 ml-4 uppercase font-black">Intake Active</span>
                 </div>
              </div>
-             <div className="flex gap-4">
-                <button className="w-16 h-16 rounded-2xl glass border border-white/10 flex items-center justify-center active:bg-white/10 transition-colors shadow-xl">
-                   <History className="w-8 h-8 opacity-20" />
+             <div className="flex gap-6">
+                <button className="w-20 h-20 rounded-[2rem] glass border-2 border-white/10 flex items-center justify-center active:bg-white/10 transition-colors shadow-xl">
+                   <History className="w-10 h-10 opacity-20" />
                 </button>
                 <div className="relative">
-                   <div className="w-20 h-20 rounded-full bg-red-600 flex items-center justify-center shadow-[0_0_50px_rgba(220,38,38,0.8)] border-4 border-white/20 relative z-10">
-                      <Mic className="w-10 h-10 text-white animate-pulse" />
+                   <div className="w-24 h-24 rounded-full bg-red-600 flex items-center justify-center shadow-[0_0_80px_rgba(220,38,38,1)] border-8 border-white/20 relative z-10">
+                      <Mic className="w-12 h-12 text-white animate-pulse" />
                    </div>
                 </div>
              </div>
