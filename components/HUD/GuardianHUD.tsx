@@ -2,10 +2,10 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import Webcam from 'react-webcam';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  ShieldAlert, 
-  ArrowLeft, 
-  Mic, 
+import {
+  ShieldAlert,
+  ArrowLeft,
+  Mic,
   Lock,
   Activity,
   UserCheck,
@@ -136,39 +136,143 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   const [isConnecting, setIsConnecting] = useState(true);
   const [isTyping, setIsTyping] = useState(false);
   const [textInput, setTextInput] = useState("");
+  const [debugMode, setDebugMode] = useState(true); // Start with debug enabled
+  const [debugLog, setDebugLog] = useState<string[]>([]);
+
+  const [aiStatus, setAiStatus] = useState<string>('IDLE');
+
+  const addDebugLog = (msg: string) => {
+    console.log(msg);
+    setDebugLog(prev => [msg, ...prev.slice(0, 20)]);
+  };
+
+  const testAI = () => {
+    addDebugLog('🧪 Testing AI with sample text...');
+    const testMsg = "Hello, I need help documenting this accident";
+    if (sessionPromise.current) {
+      sessionPromise.current.then(s => s.sendRealtimeInput({ text: testMsg }));
+    }
+  };
 
   const audioOutContext = useRef<AudioContext | null>(null);
   const audioInContext = useRef<AudioContext | null>(null);
   const nextStartTime = useRef(0);
   const sources = useRef(new Set<AudioBufferSourceNode>());
   const sessionPromise = useRef<Promise<any> | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const isRecognitionRunning = useRef(false);
 
   const startStreaming = useCallback(async () => {
     try {
+      addDebugLog('🎤 Requesting microphone access...');
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      addDebugLog('✅ Microphone access granted');
+
+      // Start speech recognition
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true; // Enable interim results for real-time
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => {
+          isRecognitionRunning.current = true;
+          // addDebugLog('🎤 Speech recognition active'); // REMOVED SPAM
+        };
+
+        recognition.onresult = (event: any) => {
+          let interimTranscript = '';
+          let finalTranscript = '';
+
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              finalTranscript += transcript + ' ';
+            } else {
+              interimTranscript += transcript;
+            }
+          }
+
+          // Show interim results in real-time
+          if (interimTranscript) {
+            setSubs(prev => ({ ...prev, user: interimTranscript }));
+          }
+
+          // Send final transcript to AI
+          if (finalTranscript) {
+            const cleanTranscript = finalTranscript.trim();
+            addDebugLog('✅ You said: ' + cleanTranscript);
+            setSubs(prev => ({ ...prev, user: cleanTranscript }));
+
+            // Send to AI
+            if (sessionPromise.current) {
+              addDebugLog('📤 Sending to AI...');
+              sessionPromise.current.then(s => s.sendRealtimeInput({ text: cleanTranscript }));
+            }
+          }
+        };
+
+        recognition.onerror = (event: any) => {
+          isRecognitionRunning.current = false;
+          if (event.error === 'not-allowed') {
+            addDebugLog('❌ Microphone permission denied!');
+            alert('⚠️ Microphone permission denied! Please allow microphone access in your browser settings.');
+          } else if (event.error !== 'aborted') {
+            // addDebugLog('❌ Speech error: ' + event.error);
+          }
+        };
+
+        recognition.onend = () => {
+          isRecognitionRunning.current = false;
+          // Only auto-restart if the component is still mounted
+          setTimeout(() => {
+            if (recognitionRef.current && !isRecognitionRunning.current) {
+              try {
+                recognition.start();
+              } catch (e) {
+                // Silently fail - will retry on next onend
+              }
+            }
+          }, 1000);
+        };
+
+        recognitionRef.current = recognition;
+        try {
+          recognition.start();
+          addDebugLog('🎤 Speech recognition initialized');
+        } catch (e) {
+          addDebugLog('❌ Could not start: ' + e);
+        }
+      } else {
+        addDebugLog('⚠️ Speech recognition not supported');
+        alert('⚠️ Speech recognition not supported. Use Chrome, Edge, or Safari.');
+      }
+
+      // Audio visualizer
       if (!audioInContext.current) return;
       const source = audioInContext.current.createMediaStreamSource(stream);
       const scriptProcessor = audioInContext.current.createScriptProcessor(4096, 1, 1);
-      
+
       scriptProcessor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
         let sum = 0;
         for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
         setMicActivity(Math.min(100, Math.sqrt(sum / inputData.length) * 400));
-        const pcmBlob = createBlob(inputData);
-        sessionPromise.current?.then(s => s.sendRealtimeInput({ media: pcmBlob }));
       };
 
       source.connect(scriptProcessor);
       scriptProcessor.connect(audioInContext.current.destination);
     } catch (err) {
-      console.error("Mic stream error:", err);
+      console.error("❌ Mic stream error:", err);
+      alert("Microphone access denied. Please allow microphone access to use voice features.");
     }
   }, []);
 
   const handleSendText = (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!textInput.trim() || !sessionPromise.current) return;
+    console.log('📤 Sending text:', textInput);
     sessionPromise.current.then(s => s.sendRealtimeInput({ text: textInput }));
     setSubs(prev => ({ ...prev, user: textInput }));
     setTextInput("");
@@ -176,30 +280,40 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
   };
 
   const initSession = useCallback(() => {
+    addDebugLog('🚀 Initializing Guardian session...');
     const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
     audioOutContext.current = new AudioCtx({ sampleRate: 24000 });
     audioInContext.current = new AudioCtx({ sampleRate: 16000 });
 
     const session = createLiveSession({
       onopen: () => {
+        addDebugLog('✅ Session connected - Ready!');
         setIsReady(true);
         setIsConnecting(false);
         startStreaming();
       },
+      onstatus: (status: string) => {
+        setAiStatus(status);
+        if (status.includes('RETRY')) addDebugLog('⚠️ AI Retrying...');
+      },
       onmessage: async (message: any) => {
         if (message.toolCall) {
+          addDebugLog('🔧 Tool call received');
           for (const fc of message.toolCall.functionCalls) {
             if (fc.name === 'draw_ar_marker') {
+              addDebugLog(`📍 AR Marker: ${fc.args.target}`);
               setArMarker(fc.args);
               sessionPromise.current?.then(s => s.sendToolResponse({
                 functionResponses: [{ id: fc.id, name: fc.name, response: { result: "Marker deployed." } }]
               }));
             } else if (fc.name === 'holographic_overlay') {
+              addDebugLog(`📊 Hologram: ${fc.args.title}`);
               setHologram(fc.args);
               sessionPromise.current?.then(s => s.sendToolResponse({
                 functionResponses: [{ id: fc.id, name: fc.name, response: { result: "Hologram active." } }]
               }));
             } else if (fc.name === 'log_evidence') {
+              addDebugLog(`🗂️ Evidence logged: ${fc.args.category}`);
               const newItem: EvidenceItem = {
                 id: Math.random().toString(36).substr(2, 9),
                 category: fc.args.category,
@@ -232,6 +346,7 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           setSubs(prev => ({ ...prev, user: message.serverContent.inputTranscription.text }));
         }
         if (message.serverContent?.outputTranscription) {
+          addDebugLog('🤖 AI: ' + message.serverContent.outputTranscription.text.substring(0, 50));
           setSubs(prev => ({ ...prev, ai: prev.ai + message.serverContent.outputTranscription.text }));
         }
         if (message.serverContent?.turnComplete) {
@@ -239,41 +354,53 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
         }
 
         if (message.serverContent?.interrupted) {
-          sources.current.forEach(s => { try { s.stop(); } catch(e) {} });
+          sources.current.forEach(s => { try { s.stop(); } catch (e) { } });
           sources.current.clear();
           nextStartTime.current = 0;
         }
       },
-      onerror: () => setIsConnecting(false),
-      onclose: () => setIsReady(false)
+      onerror: (err: any) => {
+        addDebugLog('❌ Session error: ' + err?.message);
+        setIsConnecting(false);
+      },
+      onclose: () => {
+        addDebugLog('🔌 Session closed');
+        setIsReady(false);
+      }
     });
     sessionPromise.current = session;
   }, [startStreaming]);
 
   useEffect(() => {
     if (!isReady) return;
+    addDebugLog('📸 Camera streaming to AI');
     const interval = setInterval(() => {
       const frame = webcamRef.current?.getScreenshot();
       if (frame && sessionPromise.current) {
+        // Silently send frames (don't spam debug log)
         sessionPromise.current.then(s => s.sendRealtimeInput({
           media: { data: frame.split(',')[1], mimeType: 'image/jpeg' }
         }));
       }
-    }, 1000);
+    }, 10000); // Every 10 seconds (reduced frequency for quota)
     return () => clearInterval(interval);
   }, [isReady]);
 
   useEffect(() => {
     initSession();
     return () => {
-      sources.current.forEach(s => { try { s.stop(); } catch(e) {} });
+      console.log('🧹 Cleaning up Guardian session...');
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch (e) { }
+      }
+      sources.current.forEach(s => { try { s.stop(); } catch (e) { } });
       if (audioInContext.current) audioInContext.current.close();
       if (audioOutContext.current) audioOutContext.current.close();
     };
   }, [initSession]);
 
   const getEvidenceIcon = (category: string) => {
-    switch(category) {
+    switch (category) {
       case 'WITNESS_STMT': return <Megaphone className="w-6 h-6 text-orange-400" />;
       case 'OTHER_PARTY_ADMISSION': return <Scale className="w-6 h-6 text-red-400" />;
       case 'VERBAL_TIMELINE': return <MessageSquareQuote className="w-6 h-6 text-cyan-400" />;
@@ -287,10 +414,10 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
     <div className="fixed inset-0 bg-black z-50 flex flex-col overflow-hidden font-mono uppercase italic">
       {/* Background Camera */}
       <div className="absolute inset-0">
-        <Webcam 
+        <Webcam
           ref={webcamRef} audio={false} screenshotFormat="image/jpeg"
           videoConstraints={{ facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }}
-          className="w-full h-full object-cover" 
+          className="w-full h-full object-cover"
         />
         <div className="absolute inset-0 border-[1px] border-white/5 pointer-events-none" />
       </div>
@@ -306,13 +433,13 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
                 <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-cyan-400" />
                 <div className="absolute bottom-0 left-0 w-8 h-8 border-b-4 border-l-4 border-cyan-400" />
                 <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-cyan-400" />
-                
+
                 {/* Target Scope */}
                 <div className="absolute inset-0 flex items-center justify-center">
                   <Scan className="w-16 h-16 text-cyan-400/50 animate-spin" />
                   <Target className="absolute w-8 h-8 text-cyan-400 animate-pulse" />
                 </div>
-                
+
                 {/* Floating ID Label */}
                 <motion.div animate={{ x: [0, 10, 0] }} className="absolute -top-12 left-0 right-0 text-center">
                   <span className="bg-cyan-500 text-black px-4 py-1 text-[10px] font-black tracking-widest shadow-[0_0_15px_cyan]">
@@ -359,8 +486,37 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
               <span className="text-xl font-black text-white italic tracking-tighter uppercase">Guardian_v3.0</span>
             </div>
             <div className="flex items-center gap-2 mt-1">
-               <Activity className="w-3 h-3 text-cyan-400" />
-               <span className="text-[8px] text-cyan-400 font-black tracking-widest uppercase">Streaming Gemini 3 Native Audio</span>
+              <Activity className={`w-3 h-3 ${isReady ? 'text-green-400 animate-pulse' : 'text-yellow-400'}`} />
+              <span className={`text-[8px] font-black tracking-widest uppercase ${isReady ? 'text-green-400' : 'text-yellow-400'}`}>
+                {isConnecting ? 'CONNECTING...' : isReady ? '🔴 LIVE • RECORDING' : 'INITIALIZING'}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 mt-1">
+              <Mic className={`w-3 h-3 ${micActivity > 10 ? 'text-cyan-400 animate-pulse' : 'text-white/30'}`} />
+              <span className="text-[8px] text-white/50 font-black tracking-widest uppercase">
+                MIC: {micActivity > 10 ? 'ACTIVE' : 'LISTENING'}
+              </span>
+            </div>
+            {/* NEW AI STATUS INDICATOR */}
+            <div className="flex items-center gap-2 mt-1">
+              <Loader2 className={`w-3 h-3 ${aiStatus === 'PROCESSING' || aiStatus.includes('RETRY') ? 'text-yellow-400 animate-spin' : 'text-white/30'}`} />
+              <span className={`text-[8px] font-black tracking-widest uppercase ${aiStatus.includes('RETRY') ? 'text-red-400' : aiStatus === 'PROCESSING' ? 'text-yellow-400' : 'text-white/50'}`}>
+                AI: {aiStatus}
+              </span>
+            </div>
+            <div className="flex gap-2 items-center">
+              <button
+                onClick={() => setDebugMode(!debugMode)}
+                className="mt-2 text-[7px] text-white/30 hover:text-white/60 font-black tracking-widest uppercase"
+              >
+                {debugMode ? '🔍 HIDE DEBUG' : '🔍 SHOW DEBUG'}
+              </button>
+              <button
+                onClick={testAI}
+                className="mt-2 text-[7px] text-cyan-400/50 hover:text-cyan-400 font-black tracking-widest uppercase border border-cyan-500/30 px-2 py-1 rounded"
+              >
+                🧪 TEST AI
+              </button>
             </div>
           </div>
           <button onClick={onBack} className="p-3 glass rounded-full border-white/10 active:bg-white/20">
@@ -368,8 +524,36 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
           </button>
         </div>
 
+        {/* Debug Panel */}
+        {debugMode && (
+          <div className="glass border-cyan-500/30 p-3 rounded-xl max-h-40 overflow-y-auto">
+            <div className="text-[8px] font-mono space-y-1">
+              {debugLog.length === 0 && <div className="text-white/30">Waiting for activity...</div>}
+              {debugLog.map((log, i) => (
+                <div key={i} className="text-cyan-400/80">{log}</div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Subtitles Area */}
         <div className="max-w-[300px] space-y-2 pointer-events-none">
+          {/* Speech Recognition Indicator */}
+          {micActivity > 10 && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass border-cyan-500/50 p-3 rounded-xl backdrop-blur-md bg-cyan-500/10"
+            >
+              <div className="flex items-center gap-2">
+                <Mic className="w-4 h-4 text-cyan-400 animate-pulse" />
+                <span className="text-[10px] text-cyan-400 font-black tracking-widest uppercase">
+                  🎤 LISTENING...
+                </span>
+              </div>
+            </motion.div>
+          )}
+
           <AnimatePresence mode="popLayout">
             {subs.ai && (
               <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} className="flex gap-2">
@@ -396,35 +580,36 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
       </div>
 
       {/* Interaction Deck */}
-      <div className="mt-auto relative z-30 p-6 flex flex-col gap-4">
-        <AnimatePresence>
-          {isTyping && (
-            <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 20, opacity: 0 }} className="bg-black/95 backdrop-blur-3xl border border-cyan-500/50 rounded-2xl p-2 shadow-2xl mb-2 flex items-center gap-2">
-              <form onSubmit={handleSendText} className="flex-1 flex gap-2">
-                <input autoFocus value={textInput} onChange={(e) => setTextInput(e.target.value)} placeholder="SILENT_COMMS_INPUT..." className="flex-1 bg-transparent px-4 py-3 text-white font-black italic text-xs outline-none tracking-tight uppercase" />
-                <button type="submit" className="w-10 h-10 bg-cyan-500 rounded-xl flex items-center justify-center text-black">
-                  <SendHorizontal className="w-5 h-5" />
-                </button>
-              </form>
-              <button onClick={() => setIsTyping(false)} className="px-2 text-[8px] text-white/30 font-black tracking-widest">CLOSE</button>
-            </motion.div>
-          )}
-        </AnimatePresence>
+      <div className="mt-auto relative z-30 p-4 pb-8 flex flex-col gap-4">
+        {/* Permanent Text Input */}
+        <div className="bg-black/80 backdrop-blur-md border border-cyan-500/30 rounded-2xl p-2 flex items-center gap-2">
+          <form onSubmit={handleSendText} className="flex-1 flex gap-2">
+            <input
+              value={textInput}
+              onChange={(e) => setTextInput(e.target.value)}
+              placeholder="TYPE MESSAGE TO GUARDIAN..."
+              className="flex-1 bg-transparent px-4 py-2 text-white font-black italic text-xs outline-none tracking-tight uppercase placeholder:text-white/30"
+            />
+            <button type="submit" className="w-10 h-10 bg-cyan-500 rounded-xl flex items-center justify-center text-black shadow-[0_0_15px_cyan]">
+              <SendHorizontal className="w-5 h-5" />
+            </button>
+          </form>
+        </div>
 
-        <div className="flex gap-4 h-20">
-          <button onClick={() => setIsVaultOpen(!isVaultOpen)} className="flex-1 glass border-white/10 rounded-[1.5rem] p-4 flex flex-col items-center justify-center gap-1 active:bg-white/10 transition-all">
-            <Lock className={`w-6 h-6 ${evidence.length > 0 ? 'text-green-500 drop-shadow-[0_0_10px_green]' : 'text-white/40'}`} />
+        <div className="flex gap-4 h-16">
+          <button onClick={() => setIsVaultOpen(!isVaultOpen)} className="flex-1 glass border-white/10 rounded-[1.2rem] p-3 flex flex-col items-center justify-center gap-1 active:bg-white/10 transition-all">
+            <Lock className={`w-5 h-5 ${evidence.length > 0 ? 'text-green-500 drop-shadow-[0_0_10px_green]' : 'text-white/40'}`} />
             <span className="text-[8px] font-black tracking-widest text-white/50 uppercase">Vault: {evidence.length}</span>
           </button>
-          
-          <div className="flex-1 glass border-white/10 rounded-[1.5rem] p-4 flex flex-col items-center justify-center gap-2">
+
+          <div className="flex-1 glass border-white/10 rounded-[1.2rem] p-3 flex flex-col items-center justify-center gap-2">
             <div className="flex items-center gap-3 w-full px-2">
-               <button onClick={() => setIsTyping(!isTyping)} className={`p-2 rounded-lg transition-colors ${isTyping ? 'bg-cyan-500 text-black' : 'text-cyan-400 hover:bg-white/5'}`}>
-                 <Keyboard className="w-5 h-5" />
-               </button>
-               <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
-                 <motion.div animate={{ width: `${micActivity}%` }} className="h-full bg-cyan-400 shadow-[0_0_15px_cyan]" />
-               </div>
+              <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400">
+                <Mic className="w-4 h-4" />
+              </div>
+              <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                <motion.div animate={{ width: `${micActivity}%` }} className="h-full bg-cyan-400 shadow-[0_0_15px_cyan]" />
+              </div>
             </div>
             <span className="text-[8px] font-black tracking-widest text-white/40 uppercase">Acoustic Guard</span>
           </div>
@@ -449,7 +634,7 @@ const GuardianHUD: React.FC<{ onBack: () => void }> = ({ onBack }) => {
               {evidence.map((item) => (
                 <div key={item.id} className={`glass border-white/10 p-6 rounded-[1.5rem] flex flex-col gap-4 relative overflow-hidden group ${item.category === 'OTHER_PARTY_ADMISSION' ? 'border-red-500/50 bg-red-500/5' : ''}`}>
                   <div className={`absolute top-0 left-0 w-1 h-full ${item.category === 'OTHER_PARTY_ADMISSION' ? 'bg-red-500' : 'bg-cyan-500'}`} />
-                  
+
                   <div className="flex items-start gap-5">
                     <div className={`p-3 rounded-xl ${item.category === 'OTHER_PARTY_ADMISSION' ? 'bg-red-500/10' : 'bg-cyan-500/10'}`}>
                       {getEvidenceIcon(item.category)}
