@@ -2,62 +2,73 @@
 import { GoogleGenAI, Type, Modality } from "@google/genai";
 import { DiagnosticResult, ScepticResult } from "../types";
 
-const GUARDIAN_LIVE_PROMPT = `You are "J-Jaga Guardian," a tactical AI emergency agent for Malaysian road safety. 
+const GUARDIAN_LIVE_PROMPT = `You are "J-Jaga Guardian," a Tier-1 Tactical Malaysian Emergency Response Agent powered by Gemini 3. 
 
-STRICT INVESTIGATION PROTOCOL (STATE-GATE SYSTEM):
-You MUST follow these phases in order. Do NOT skip steps or jump to the license plate immediately.
+OPERATIONAL OBJECTIVE: 
+Secure the scene, gather admissible evidence, and manage user safety through continuous verbal engagement.
 
-PHASE 1: SAFETY & STABILIZATION
-- Greet: "Guardian active. I am recording. Are you physically safe and out of traffic?"
-- WAIT for the user to answer. If they are in danger, guide them to safety.
+PHASE 1: IMMEDIATE TRIAGE & SAFETY
+- Establish contact: "Guardian active. Encrypted recording starting now. Are you hurt? Is anyone else trapped?"
+- Ask about environmental hazards: "Is there any fuel smell or smoke coming from the engine? Move to a safe spot on the shoulder if possible."
 
-PHASE 2: DAMAGE DOCUMENTATION (THE POINT OF IMPACT)
-- Ask: "I need to document the damage first. Point the camera at the impact zone of your vehicle."
-- IMMEDIATELY call 'draw_ar_marker' (target: 'damage', label: 'SCAN IMPACT AREA').
-- Wait for the user to show the damage. Analyze it out loud (e.g., "I see the scratches on your fender").
-- LOG IT: Call 'log_evidence' (category: 'DAMAGE_REPORT').
+PHASE 2: DYNAMIC EVIDENCE GATHERING (CONTINUOUS PROBING)
+- Don't just wait for them. PROMPT for missing info:
+  - "I need the other vehicle's details. Point your camera at their plate." (Call 'draw_ar_marker' target: 'plate')
+  - "Look for their Road Tax disc on the windscreen. I need to verify their insurance." (Call 'draw_ar_marker' target: 'road_tax')
+  - "Describe the other driver's behavior. Are they being aggressive or cooperative?"
+  - "Any witnesses nearby? Pan the camera to anyone standing around."
 
-PHASE 3: IDENTIFIER LOGGING (LICENSE PLATES)
-- ONLY move here after Phase 2. Say: "Understood. Now, show me the other vehicle's license plate."
-- IMMEDIATELY call 'draw_ar_marker' (target: 'plate', label: 'LOCK PLATE').
-- When you see the plate, LOG IT: Call 'log_evidence' (category: 'PLATE').
+PHASE 3: 3RD PARTY MONITORING
+- Listen for admissions of fault. If heard, IMMEDIATELY call 'log_evidence' with category 'OTHER_PARTY_ADMISSION'.
+- If the other driver says "I didn't see you" or "Sorry", log it as a critical legal point.
 
-PHASE 4: WITNESS & ENVIRONMENT
-- Ask: "Are there any witnesses or road signs nearby? Point the camera towards them."
-- Call 'draw_ar_marker' (target: 'witness', label: 'IDENTIFY WITNESS').
+PHASE 4: AR ANNOTATION
+- Use 'draw_ar_marker' to guide the user. 
+- Use 'holographic_overlay' to project data points (e.g., "Plate: WXA 1234 - Status: Active") onto the HUD.
 
-AMBIENT LISTENING MODE:
-- Constantly listen for a second voice. If the other driver says "I'm sorry" or "My bad," immediately log it as 'OTHER_PARTY_ADMISSION'.
-
-RULES:
-- Do not rush. Wait for the user to confirm each visual task.
-- Use Malaysian road terms: 'motorcycle', 'lorry', 'road tax', 'plate', 'JPJ'.
-- Remind the user: "Do not admit fault to the other driver. I am documenting the truth."`;
+MALAYSIAN PROTOCOL:
+- Use localized context: 'JPJ', 'PDRM', 'Road Tax', 'Insurance Cover Note', 'Abang', 'Kakak'.
+- Be firm but reassuring. You are their digital lawyer and bodyguard.`;
 
 export const TOOLS = [
   {
     name: 'draw_ar_marker',
     parameters: {
       type: Type.OBJECT,
-      description: 'Project a 3D holographic targeting bracket on the HUD to guide user capture.',
+      description: 'Project high-contrast tactical brackets onto a specific target in the real world.',
       properties: {
-        target: { type: Type.STRING, enum: ['plate', 'damage', 'motorcycle', 'witness', 'road_tax', 'face'] },
-        label: { type: Type.STRING, description: 'The instruction to show on the AR bracket (e.g. LOCK PLATE)' },
-        rotationX: { type: Type.NUMBER, description: '3D Tilt' },
-        rotationY: { type: Type.NUMBER, description: '3D Pan' }
+        target: { type: Type.STRING, enum: ['plate', 'damage', 'road_tax', 'face', 'witness', 'hazards'] },
+        label: { type: Type.STRING, description: 'Direct instruction for the user' }
       },
       required: ['target', 'label'],
     },
   },
   {
+    name: 'holographic_overlay',
+    parameters: {
+      type: Type.OBJECT,
+      description: 'Project a data-rich holographic panel onto the HUD with specific entity details.',
+      properties: {
+        title: { type: Type.STRING, description: 'Heading of the data panel' },
+        data_points: { 
+          type: Type.ARRAY, 
+          items: { type: Type.STRING },
+          description: 'List of facts gathered (e.g. Plate number, engine status)' 
+        },
+        severity: { type: Type.STRING, enum: ['INFO', 'CAUTION', 'CRITICAL'] }
+      },
+      required: ['title', 'data_points'],
+    }
+  },
+  {
     name: 'log_evidence',
     parameters: {
       type: Type.OBJECT,
-      description: 'Permanently store a piece of evidence in the Digital Vault.',
+      description: 'Commit a specific interaction or visual finding to the permanent incident vault.',
       properties: {
-        category: { type: Type.STRING, enum: ['PLATE', 'WITNESS_STMT', 'DAMAGE_REPORT', 'OTHER_PARTY_ADMISSION'] },
-        value: { type: Type.STRING, description: 'The data captured (e.g. WXA1234 or "Rear Bumper Dent")' },
-        details: { type: Type.STRING, description: 'Contextual notes for insurance' }
+        category: { type: Type.STRING, enum: ['PLATE', 'WITNESS_STMT', 'DAMAGE_REPORT', 'OTHER_PARTY_ADMISSION', 'VERBAL_TIMELINE', 'MEDICAL_STATUS'] },
+        value: { type: Type.STRING, description: 'The core evidence text' },
+        details: { type: Type.STRING, description: 'Contextual meta-data' }
       },
       required: ['category', 'value'],
     }
@@ -84,7 +95,7 @@ export const analyzeSceptic = async (url: string): Promise<ScepticResult> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const response = await ai.models.generateContent({
     model: 'gemini-3-pro-preview',
-    contents: `Vet car listing: ${url}`,
+    contents: `Vet car listing for fraud/lemons: ${url}`,
     config: { tools: [{ googleSearch: {} }] }
   });
   const jsonMatch = response.text.match(/\{[\s\S]*\}/);
